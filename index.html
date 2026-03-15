@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>极客私有云 V7 - 大文件直传版</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <style> input[type="file"] { display: none; } </style>
+</head>
+<body class="bg-gray-100 min-h-screen font-sans">
+  <div class="max-w-5xl mx-auto py-8 px-4 md:px-8">
+    
+    <div class="bg-white rounded-xl shadow-sm p-6 mb-6 flex flex-col md:flex-row justify-between items-center gap-4">
+      <div class="w-full md:w-auto">
+        <h1 class="text-2xl font-bold text-gray-800"><i class="fas fa-cloud text-blue-500 mr-2"></i> 极客私有云 <span class="text-xs bg-red-100 text-red-500 px-2 py-1 rounded ml-2">直传版</span></h1>
+        <div id="breadcrumb" class="text-sm text-gray-500 mt-2 flex flex-wrap gap-1 items-center">未连接</div>
+      </div>
+      
+      <div class="flex gap-3 w-full md:w-auto">
+        <button onclick="configSettings()" class="bg-gray-800 hover:bg-gray-900 text-white px-4 py-2 rounded-lg transition shadow-sm flex items-center gap-2">
+          <i class="fas fa-cog"></i> 密钥配置
+        </button>
+        <label class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg cursor-pointer transition shadow-sm flex items-center justify-center gap-2">
+          <i class="fas fa-upload"></i> 上传大文件
+          <input type="file" id="fileInput" onchange="uploadBigFile()">
+        </label>
+        <button onclick="createFolder()" class="bg-emerald-500 hover:bg-emerald-600 text-white px-4 py-2 rounded-lg transition shadow-sm flex items-center justify-center gap-2">
+          <i class="fas fa-folder-plus"></i> 新建文件夹
+        </button>
+      </div>
+    </div>
+
+    <div class="bg-white rounded-xl shadow-sm overflow-hidden border border-gray-100">
+      <div class="bg-gray-50 px-6 py-3 grid grid-cols-12 gap-4 text-sm font-semibold text-gray-500 border-b border-gray-200">
+        <div class="col-span-8 md:col-span-7">文件名称</div>
+        <div class="col-span-3 hidden md:block text-right">大小</div>
+        <div class="col-span-4 md:col-span-2 text-right">操作</div>
+      </div>
+      <div id="fileList" class="divide-y divide-gray-100">
+        <div class="p-12 text-center text-gray-400">请先点击右上角【密钥配置】连接 Hugging Face</div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { commitOperations } from "https://cdn.jsdelivr.net/npm/@huggingface/hub@0.15.1/+esm";
+    window.hfCommit = commitOperations; // 暴露给全局使用
+  </script>
+
+  <script>
+    let currentPath = '';
+    
+    // 1. 本地安全读取配置
+    function getSettings() {
+      return {
+        token: localStorage.getItem('hf_token'),
+        repo: localStorage.getItem('hf_repo')
+      };
+    }
+
+    function configSettings() {
+      const token = prompt('请输入 Hugging Face Token (Write权限):', localStorage.getItem('hf_token') || '');
+      if (!token) return;
+      const repo = prompt('请输入仓库路径 (例如: username/my-disk):', localStorage.getItem('hf_repo') || '');
+      if (!repo) return;
+      
+      localStorage.setItem('hf_token', token);
+      localStorage.setItem('hf_repo', repo);
+      alert('配置已保存到浏览器本地！');
+      loadFiles('');
+    }
+
+    function renderBreadcrumb(path) {
+      const settings = getSettings();
+      if (!settings.token) return;
+      
+      let parts = path.split('/').filter(p => p);
+      let html = \`<span class="cursor-pointer hover:text-blue-500 transition" onclick="loadFiles('')"><i class="fas fa-home"></i> \${settings.repo}</span>\`;
+      let curr = '';
+      for (let p of parts) {
+        curr += curr ? '/' + p : p;
+        html += \` <span class="text-gray-300">/</span> <span class="cursor-pointer hover:text-blue-500 transition" onclick="loadFiles('\${curr}')">\${p}</span>\`;
+      }
+      document.getElementById('breadcrumb').innerHTML = html;
+    }
+
+    // 2. 加载文件列表 (直接通过浏览器 Fetch 获取 HF API)
+    async function loadFiles(path = '') {
+      const settings = getSettings();
+      if (!settings.token || !settings.repo) return;
+      
+      currentPath = path;
+      renderBreadcrumb(path);
+      document.getElementById('fileList').innerHTML = '<div class="p-12 text-center text-blue-500"><i class="fas fa-spinner fa-spin text-3xl mb-3"></i><br>读取目录中...</div>';
+      
+      try {
+        let treeUrl = \`https://huggingface.co/api/datasets/\${settings.repo}/tree/main\`;
+        if (path) treeUrl += '/' + path.split('/').map(encodeURIComponent).join('/');
+        treeUrl += '?t=' + Date.now();
+
+        const res = await fetch(treeUrl, { headers: { 'Authorization': 'Bearer ' + settings.token } });
+        if (!res.ok) throw new Error(await res.text());
+        
+        const items = await res.json();
+        let html = '';
+        
+        if (path !== '') {
+          const parent = path.split('/').slice(0, -1).join('/');
+          html += \`<div class="px-6 py-4 flex items-center gap-3 hover:bg-gray-50 transition cursor-pointer text-gray-500 hover:text-blue-500" onclick="loadFiles('\${parent}')"><i class="fas fa-level-up-alt mt-1"></i> 返回上一级</div>\`;
+        }
+
+        let fileCount = 0;
+        items.forEach(f => {
+          f.name = f.path.split('/').pop();
+          if (f.name === 'README.md') return; // 隐藏占位文件
+          fileCount++;
+          
+          const isDir = f.type === 'directory';
+          const icon = isDir ? '<i class="fas fa-folder text-yellow-400 text-xl"></i>' : '<i class="fas fa-file-alt text-gray-400 text-xl"></i>';
+          const downloadUrl = \`https://huggingface.co/datasets/\${settings.repo}/resolve/main/\${encodeURIComponent(f.path)}\`;
+          const nameClick = isDir ? \`onclick="loadFiles('\${f.path}')"\` : \`href="\${downloadUrl}" target="_blank"\`;
+          const nameTag = isDir ? \`<span class="cursor-pointer font-medium text-gray-700 hover:text-blue-500 transition" \${nameClick}>\${f.name}</span>\` : \`<a class="font-medium text-gray-700 hover:text-blue-500 transition line-clamp-1" \${nameClick}>\${f.name}</a>\`;
+          const sizeStr = isDir ? '--' : (f.size / 1024 / 1024).toFixed(2) + ' MB';
+
+          html += \`
+          <div class="px-6 py-4 grid grid-cols-12 gap-4 items-center hover:bg-blue-50/50 transition border-b border-gray-100 last:border-0 group">
+            <div class="col-span-8 md:col-span-7 flex items-center gap-3 overflow-hidden">\${icon} \${nameTag}</div>
+            <div class="col-span-3 hidden md:flex items-center justify-end text-sm text-gray-400">\${sizeStr}</div>
+            <div class="col-span-4 md:col-span-2 flex items-center justify-end gap-2 text-sm opacity-100 md:opacity-0 group-hover:opacity-100 transition-opacity">
+              <button onclick="deleteItem('\${f.path}', \${isDir})" class="text-red-500 hover:text-red-700 p-2 rounded-lg hover:bg-red-100 transition" title="删除"><i class="fas fa-trash"></i></button>
+            </div>
+          </div>\`;
+        });
+        
+        document.getElementById('fileList').innerHTML = fileCount ? html : (html + '<div class="p-12 text-center text-gray-400">此文件夹为空</div>');
+      } catch(err) {
+        document.getElementById('fileList').innerHTML = \`<div class="p-12 text-center text-red-500">❌ 错误: \${err.message}</div>\`;
+      }
+    }
+
+    // 3. 【核心技术】官方 SDK 二进制直传（支持大文件，自动切片不占内存）
+    async function uploadBigFile() {
+      const settings = getSettings();
+      if (!settings.token) return alert('请先配置密钥！');
+      
+      const file = document.getElementById('fileInput').files[0];
+      if (!file) return;
+      
+      const targetPath = currentPath ? currentPath + '/' + file.name : file.name;
+      document.getElementById('fileList').innerHTML = \`<div class="p-12 text-center text-blue-500"><i class="fas fa-spinner fa-spin text-3xl mb-3"></i><br>🚀 正在全速直传: \${file.name}<br><span class="text-sm text-gray-400">大文件请耐心等待，切勿关闭网页</span></div>\`;
+      
+      try {
+        // 直接将原生的 File 对象交给 HF SDK，零 Base64 转换！
+        await window.hfCommit({
+          repo: { type: 'dataset', name: settings.repo },
+          credentials: { accessToken: settings.token },
+          operations: [ { operation: 'add', path: targetPath, content: file } ],
+          commitMessage: \`直传大文件: \${file.name}\`
+        });
+        
+        document.getElementById('fileInput').value = '';
+        setTimeout(() => loadFiles(currentPath), 1000);
+      } catch (err) {
+        alert('上传失败: ' + err.message);
+        loadFiles(currentPath);
+      }
+    }
+
+    // 4. 新建文件夹与删除 (通过 SDK)
+    async function createFolder() {
+      const settings = getSettings();
+      const folderName = prompt('请输入新文件夹名称：');
+      if (!folderName) return;
+      
+      const targetPath = currentPath ? currentPath + '/' + folderName + '/README.md' : folderName + '/README.md';
+      
+      try {
+        await window.hfCommit({
+          repo: { type: 'dataset', name: settings.repo },
+          credentials: { accessToken: settings.token },
+          operations: [ { operation: 'add', path: targetPath, content: new Blob(['# ' + folderName], {type: 'text/markdown'}) } ],
+          commitMessage: \`新建文件夹: \${folderName}\`
+        });
+        setTimeout(() => loadFiles(currentPath), 1000);
+      } catch(err) { alert('创建失败: ' + err.message); }
+    }
+
+    async function deleteItem(path, isDir) {
+      const settings = getSettings();
+      if(!confirm('确定要删除 ' + path + ' 吗？')) return;
+      try {
+        await window.hfCommit({
+          repo: { type: 'dataset', name: settings.repo },
+          credentials: { accessToken: settings.token },
+          operations: [ { operation: 'delete', path: path } ],
+          commitMessage: \`删除: \${path}\`
+        });
+        setTimeout(() => loadFiles(currentPath), 1000);
+      } catch(err) { alert('删除失败: ' + err.message); }
+    }
+
+    if (getSettings().token) loadFiles();
+  </script>
+</body>
+</html>
